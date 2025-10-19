@@ -9,7 +9,7 @@ This repository contains utility scripts for converting the CAP REM Sleep Behavi
 | `config_cap_paths.py` | Central location for file-system paths and global preprocessing constants (sampling rate and epoch duration). Import this module from other scripts to ensure all stages reference the same directories. |
 | `bridge_cap_to_sleepfm.py` | Parses CAP RBD EDF recordings and their TXT annotations, standardises the selected BAS channels (EEG/EOG/EMG), segments them into 30-second epochs, saves each epoch as a `.npy` shard in SleepFM's directory layout, and emits a manifest CSV describing every epoch. |
 | `sleepfm_cap_manifest_dataset.py` | Provides a PyTorch `Dataset` (`CapManifestEpochs`) that consumes the manifest CSV produced by the bridge script and lazily loads BAS epoch tensors alongside metadata (stage codes, subject IDs, epoch indices). |
-| `generate_embeddings_bas.py` | Loads the pretrained SleepFM BAS encoder weights, iterates over epochs via `CapManifestEpochs`, and stores embedding vectors and an accompanying index CSV for later tasks. |
+| `generate_embeddings_bas.py` | Loads the pretrained SleepFM BAS encoder weights, iterates over epochs via `CapManifestEpochs`, and stores embedding vectors and an accompanying index CSV for later tasks. The script now auto-detects a suitable BAS encoder class from the SleepFM source tree when `--encoder-class` is left at its default (`auto`). |
 | `train_rbd_probe.py` | Trains logistic-regression probes on the saved embeddings to evaluate sleep-stage classification and REM-with-abnormal-muscle-activity detection, reporting cross-validated AUROC/AUPRC scores. |
 
 ## How the Pieces Fit Together
@@ -42,6 +42,7 @@ Each stage shares configuration through `config_cap_paths.py`, ensuring consiste
    ```bash
    python generate_embeddings_bas.py
    ```
+   The command attempts to auto-detect the BAS encoder definition from the SleepFM repository referenced in `config_cap_paths.py`. If you maintain a custom checkout or renamed modules, override the discovery step with `--encoder-class <module.ClassName>`.
 5. **Train probes**:
    ```bash
    python train_rbd_probe.py

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
+import inspect
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -24,8 +26,27 @@ LOG = logging.getLogger(__name__)
 
 
 def _resolve_encoder_class(qualified_name: str):
+    search_roots = _sleepfm_search_roots()
+
+    if qualified_name.lower() == "auto":
+        class_obj, attempted = _auto_select_encoder_class(search_roots)
+        if class_obj is not None:
+            LOG.info(
+                "Auto-detected encoder class %s from SleepFM repository",
+                f"{class_obj.__module__}.{class_obj.__name__}",
+            )
+            return class_obj
+        attempted_str = ", ".join(str(p) for p in attempted) if attempted else "<none>"
+        raise ModuleNotFoundError(
+            (
+                "Failed to automatically locate a BAS encoder within the SleepFM repository. "
+                "Specify --encoder-class explicitly. "
+                f"Attempted files: {attempted_str}"
+            )
+        )
+
     module_path, class_name = qualified_name.rsplit(".", 1)
-    module, attempted, search_roots = _import_module_with_repo_fallback(module_path)
+    module, attempted = _import_module_with_repo_fallback(module_path, search_roots)
     if module is not None:
         try:
             return getattr(module, class_name)
@@ -48,16 +69,23 @@ def _resolve_encoder_class(qualified_name: str):
     )
 
 
-def _import_module_with_repo_fallback(module_path: str) -> Tuple[Optional[object], List[Path], List[Path]]:
+def _sleepfm_search_roots() -> List[Path]:
+    search_roots: List[Path] = []
+    for candidate in (SLEEPFM_REPO, SLEEPFM_REPO / "src"):
+        if candidate.exists():
+            search_roots.append(candidate)
+        else:
+            LOG.debug("SleepFM path %s does not exist; skipping", candidate)
+    return search_roots
+
+
+def _import_module_with_repo_fallback(
+    module_path: str, search_roots: List[Path]
+) -> Tuple[Optional[object], List[Path]]:
     """Import ``module_path`` with additional search paths inside ``SLEEPFM_REPO``."""
 
-    search_roots = [p for p in (SLEEPFM_REPO, SLEEPFM_REPO / "src") if p.exists()]
-    missing_roots = [p for p in (SLEEPFM_REPO, SLEEPFM_REPO / "src") if not p.exists()]
-    for missing in missing_roots:
-        LOG.debug("SleepFM path %s does not exist; skipping", missing)
-
     try:
-        return importlib.import_module(module_path), [], search_roots
+        return importlib.import_module(module_path), []
     except ModuleNotFoundError:
         pass
 
@@ -71,12 +99,12 @@ def _import_module_with_repo_fallback(module_path: str) -> Tuple[Optional[object
         LOG.debug("Added SleepFM repo paths to sys.path: %s", injected)
 
     try:
-        return importlib.import_module(module_path), [], search_roots
+        return importlib.import_module(module_path), []
     except ModuleNotFoundError:
         pass
 
     module, attempted = _load_module_from_repo(module_path, search_roots)
-    return module, attempted, search_roots
+    return module, attempted
 
 
 def _load_module_from_repo(module_path: str, search_roots: List[Path]) -> Tuple[Optional[object], List[Path]]:
@@ -131,6 +159,71 @@ def _load_class_from_repo(class_name: str, search_roots: List[Path]) -> Tuple[Op
             attr = getattr(module, class_name, None)
             if attr is not None:
                 return attr, attempted
+
+    return None, attempted
+
+
+def _auto_select_encoder_class(search_roots: List[Path]) -> Tuple[Optional[type], List[Path]]:
+    """Attempt to automatically identify a BAS encoder class from SleepFM sources."""
+
+    attempted: List[Path] = []
+    preferred_names = [
+        "BasEncoder",
+        "BASencoder",
+        "BASNet",
+        "BasModel",
+        "SleepFMBasEncoder",
+        "SleepFMEncoder",
+        "EfficientNet1D",
+        "EfficientNetEncoder",
+    ]
+
+    for name in preferred_names:
+        class_obj, tried = _load_class_from_repo(name, search_roots)
+        attempted.extend(tried)
+        if class_obj is not None:
+            return class_obj, attempted
+
+    try:
+        from torch.nn import Module as TorchModule
+    except ImportError:
+        TorchModule = None  # type: ignore[assignment]
+
+    if TorchModule is None:
+        return None, attempted
+
+    seen_files: Set[Path] = set()
+    for root in search_roots:
+        for file_path in root.rglob("*.py"):
+            if file_path in seen_files:
+                continue
+            seen_files.add(file_path)
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "class" not in text or "Encoder" not in text:
+                continue
+            for match in re.finditer(r"class\s+(\w+)\s*\(([^)]*)\):", text):
+                class_name = match.group(1)
+                lower = class_name.lower()
+                if "encoder" not in lower:
+                    continue
+                if not any(token in lower for token in ("bas", "sleepfm", "efficientnet")):
+                    continue
+                attempted.append(file_path)
+                module_name = ".".join(file_path.relative_to(root).with_suffix("").parts)
+                module = _load_module_from_file(module_name, file_path)
+                if module is None:
+                    continue
+                attr = getattr(module, class_name, None)
+                if attr is None or not inspect.isclass(attr):
+                    continue
+                try:
+                    if issubclass(attr, TorchModule):
+                        return attr, attempted
+                except TypeError:
+                    continue
 
     return None, attempted
 
@@ -213,7 +306,19 @@ def generate_embeddings(
                 sys.path.append(candidate_str)
 
     encoder_class = _resolve_encoder_class(encoder_class_path)
-    model = encoder_class()
+    LOG.info(
+        "Initialising encoder class %s.%s",
+        encoder_class.__module__,
+        encoder_class.__name__,
+    )
+    try:
+        model = encoder_class()
+    except TypeError as exc:
+        raise TypeError(
+            "Failed to instantiate the SleepFM encoder. "
+            "If the class requires constructor arguments, provide a wrapper "
+            "or adjust --encoder-class to reference a zero-argument factory."
+        ) from exc
     state = torch.load(checkpoint_path, map_location="cpu")
     if checkpoint_key:
         state = state[checkpoint_key]
@@ -307,8 +412,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--encoder-class",
         type=str,
-        default="sleepfm.models.bas_encoder.BasEncoder",
-        help="Fully-qualified encoder class name",
+        default="auto",
+        help="Fully-qualified encoder class name or 'auto' to detect the BAS encoder",
     )
     parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT)
     parser.add_argument(

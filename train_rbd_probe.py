@@ -109,6 +109,11 @@ def _train_rbd_probe(X: np.ndarray, y: np.ndarray, groups: np.ndarray) -> Dict[s
 
 def train_probes(manifest_path: Path, embeddings_path: Path) -> None:
     manifest = pd.read_csv(manifest_path)
+    if not embeddings_path.exists():
+        raise FileNotFoundError(
+            f"Embeddings index not found at {embeddings_path}. "
+            "Run generate_embeddings_bas.py first to create embeddings_bas.csv."
+        )
     embeddings = pd.read_csv(embeddings_path)
 
     merged = manifest.merge(
