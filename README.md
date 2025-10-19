@@ -1,1 +1,58 @@
-# sleepdisorderclassification
+# CAP-RBD SleepFM Integration Toolkit
+
+This repository contains utility scripts for converting the CAP REM Sleep Behavior Disorder (RBD) subset of the CAP Sleep Database into the format expected by the SleepFM foundation model, generating embeddings, and training lightweight probes for downstream analysis.
+
+## Repository Contents
+
+| Script | Summary |
+| --- | --- |
+| `config_cap_paths.py` | Central location for file-system paths and global preprocessing constants (sampling rate and epoch duration). Import this module from other scripts to ensure all stages reference the same directories. |
+| `bridge_cap_to_sleepfm.py` | Parses CAP RBD EDF recordings and their TXT annotations, standardises the selected BAS channels (EEG/EOG/EMG), segments them into 30-second epochs, saves each epoch as a `.npy` shard in SleepFM's directory layout, and emits a manifest CSV describing every epoch. |
+| `sleepfm_cap_manifest_dataset.py` | Provides a PyTorch `Dataset` (`CapManifestEpochs`) that consumes the manifest CSV produced by the bridge script and lazily loads BAS epoch tensors alongside metadata (stage codes, subject IDs, epoch indices). |
+| `generate_embeddings_bas.py` | Loads the pretrained SleepFM BAS encoder weights, iterates over epochs via `CapManifestEpochs`, and stores embedding vectors and an accompanying index CSV for later tasks. |
+| `train_rbd_probe.py` | Trains logistic-regression probes on the saved embeddings to evaluate sleep-stage classification and REM-with-abnormal-muscle-activity detection, reporting cross-validated AUROC/AUPRC scores. |
+
+## How the Pieces Fit Together
+
+The end-to-end pipeline is executed sequentially:
+
+1. **Preprocess raw CAP data** with `bridge_cap_to_sleepfm.py`. This script depends on `config_cap_paths.py` for locating the raw EDF/TXT files (`RAW_DIR`) and the SleepFM-style processed directory (`PROCESSED_DIR`). It outputs per-subject epoch shards under `sleepfm_processed/shards/<subject>/BAS/` and a manifest called `manifest_cap_rbd_bas_only.csv` summarising all epochs, including stage codes and file paths.
+2. **Load epochs for inference** using `sleepfm_cap_manifest_dataset.py`. This dataset implementation is reused by `generate_embeddings_bas.py` to feed batches into the encoder.
+3. **Generate embeddings** with `generate_embeddings_bas.py`. The script loads the pretrained SleepFM BAS encoder (`CHECKPOINT`) and writes 30-second epoch embeddings to `sleepfm_processed/embeddings/`, while producing an index file `embeddings_bas.csv`. The manifest and embedding index share subject IDs and epoch indices, enabling downstream merges.
+4. **Train evaluation probes** via `train_rbd_probe.py`. It merges the manifest and embedding indices, constructs sleep-stage and proxy RBD labels, performs subject-level cross-validation, and prints metrics to stdout.
+
+Each stage shares configuration through `config_cap_paths.py`, ensuring consistent target sampling frequency (`FS_TARGET = 256 Hz`) and epoch length (`EPOCH_LEN_S = 30 s`) across the pipeline.
+
+## Assumptions and Requirements
+
+* **Channel availability**: The bridge script assumes the BAS channel bundle (EEG, EOG, EMG) can be extracted from each EDF. Missing channels will trigger warnings or skips depending on severity.
+* **Annotation format**: CAP RBD TXT annotations must align with the helper parsing logic in `bridge_cap_to_sleepfm.py`. They should provide sleep stages and any REM/EMG events needed for RBD proxy labelling.
+* **Checkpoint format**: `generate_embeddings_bas.py` expects a pretrained SleepFM checkpoint that contains BAS encoder weights accessible via the key used in the script (e.g., `"bas_encoder"`). Adjust loading code if the checkpoint structure differs.
+* **Dependencies**: All scripts require the SleepFM repository dependencies plus additional libraries (`mne`, `numpy`, `torch`, `pandas`, `scikit-learn`). Install them in the same environment as outlined in the original project instructions.
+
+## Usage Guide
+
+1. **Configure paths**: Edit `config_cap_paths.py` so that `RAW_DIR`, `PROCESSED_DIR`, `SLEEPFM_REPO`, and `CHECKPOINT` match your local machine.
+2. **Activate environment**: Use the Python environment that contains SleepFM and the required dependencies.
+3. **Run preprocessing**:
+   ```bash
+   python bridge_cap_to_sleepfm.py
+   ```
+4. **Generate embeddings** (after preprocessing completes):
+   ```bash
+   python generate_embeddings_bas.py
+   ```
+5. **Train probes**:
+   ```bash
+   python train_rbd_probe.py
+   ```
+
+Intermediate outputs (manifests, shard directories, embeddings) are stored under `PROCESSED_DIR`, making the pipeline restartable from any stage by reusing the generated artifacts.
+
+## Extending the Toolkit
+
+* Add multi-modality support by modifying `bridge_cap_to_sleepfm.py` to emit ECG or respiratory modalities and adjusting SleepFM configuration accordingly.
+* Swap the probe model in `train_rbd_probe.py` for alternative classifiers (e.g., linear SVM, gradient boosting) to compare performance.
+* Use the embeddings and manifests as inputs to downstream analytics or visualisation tools, such as event-level attribution studies or SleepFM fine-tuning scripts.
+
+For additional project context—including environment setup, pipeline execution order, and quality checks—refer back to the original instruction document supplied with the dataset.
