@@ -179,7 +179,7 @@ def _pick_bas_channels(raw: mne.io.BaseRaw) -> Tuple[List[int], List[str]]:
     """Select EEG, EOG, and EMG channels."""
 
     picks = mne.pick_types(raw.info, eeg=True, eog=True, emg=True, ecg=False)
-    if not picks:
+    if picks.size == 0:
         raise RuntimeError("No EEG/EOG/EMG channels found in the recording")
     channel_names = [raw.ch_names[idx] for idx in picks]
     return picks, channel_names
