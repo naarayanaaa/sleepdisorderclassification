@@ -317,6 +317,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if args.overwrite_manifest and manifest_path.exists():
         manifest_path.unlink()
 
+    manifest_frame: Optional[pd.DataFrame]
+    if manifest_path.exists():
+        manifest_frame = pd.read_csv(manifest_path)
+    else:
+        manifest_frame = None
+
     recording_pairs = discover_recordings(args.raw_dir)
     if not recording_pairs:
         LOGGER.warning("No EDF/TXT pairs found in %s", args.raw_dir)
@@ -328,28 +334,56 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         subject_id = edf_path.stem
         subject_dir, done_marker = _subject_paths(processed_root, subject_id)
         shard_exists = subject_dir.exists() and any(subject_dir.glob("*.npy"))
+        subject_manifest = None
+        if manifest_frame is not None:
+            subject_manifest = manifest_frame[manifest_frame["subject_id"] == subject_id]
         if done_marker.exists():
             if shard_exists:
-                LOGGER.info(
-                    "Skipping %s because %s is present and shards already exist",
-                    subject_id,
+                if subject_manifest is not None and not subject_manifest.empty:
+                    LOGGER.info(
+                        "Skipping %s because %s is present and shards already exist",
+                        subject_id,
+                        done_marker,
+                    )
+                    total_epochs += len(subject_manifest)
+                    try:
+                        first_channels = json.loads(subject_manifest.iloc[0]["bas_channels_json"])
+                        channel_counts.append(len(first_channels))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+                LOGGER.warning(
+                    "Detected %s for %s but manifest rows are missing; regenerating subject",
                     done_marker,
+                    subject_id,
                 )
-                continue
-            LOGGER.warning(
-                "Found %s for %s but no shards detected; removing marker and reprocessing",
-                done_marker,
-                subject_id,
-            )
+            else:
+                LOGGER.warning(
+                    "Found %s for %s but no shards detected; removing marker and reprocessing",
+                    done_marker,
+                    subject_id,
+                )
             done_marker.unlink(missing_ok=True)
         elif shard_exists:
-            LOGGER.info(
-                "Detected existing shards for %s without a %s marker; assuming prior success",
-                subject_id,
-                DONE_MARKER_NAME,
-            )
-            done_marker.touch()
-            continue
+            if subject_manifest is None or subject_manifest.empty:
+                LOGGER.info(
+                    "Detected existing shards for %s but no manifest rows found; reprocessing",
+                    subject_id,
+                )
+            else:
+                LOGGER.info(
+                    "Detected existing shards for %s without a %s marker; assuming prior success",
+                    subject_id,
+                    DONE_MARKER_NAME,
+                )
+                done_marker.touch()
+                total_epochs += len(subject_manifest)
+                try:
+                    first_channels = json.loads(subject_manifest.iloc[0]["bas_channels_json"])
+                    channel_counts.append(len(first_channels))
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
         try:
             epochs, n_channels = process_recording(
                 edf_path,
@@ -363,6 +397,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             continue
         total_epochs += epochs
         channel_counts.append(n_channels)
+        # Reload manifest so subsequent iterations have access to the fresh rows
+        manifest_frame = pd.read_csv(manifest_path)
+
+    if not channel_counts and manifest_path.exists():
+        manifest_frame = pd.read_csv(manifest_path)
+        if not manifest_frame.empty:
+            channel_counts = [
+                len(json.loads(row))
+                for row in manifest_frame.drop_duplicates("subject_id")["bas_channels_json"]
+            ]
+            total_epochs = len(manifest_frame)
 
     LOGGER.info("Processed %d subjects", len(channel_counts))
     LOGGER.info("Total epochs: %d", total_epochs)

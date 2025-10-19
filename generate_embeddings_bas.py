@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import logging
 import sys
 from pathlib import Path
@@ -40,14 +41,41 @@ def _resolve_encoder_class(qualified_name: str):
         try:
             module = importlib.import_module(module_path)
         except ModuleNotFoundError as retry_error:
-            raise ModuleNotFoundError(
-                (
-                    f"Could not import '{module_path}'. "
-                    "Verify that the SleepFM repository is available at "
-                    f"{SLEEPFM_REPO} or install the package into the environment."
-                )
-            ) from retry_error
+            module = _load_module_from_repo(module_path)
+            if module is None:
+                raise ModuleNotFoundError(
+                    (
+                        f"Could not import '{module_path}'. "
+                        "Verify that the SleepFM repository is available at "
+                        f"{SLEEPFM_REPO} or install the package into the environment."
+                    )
+                ) from retry_error
     return getattr(module, class_name)
+
+
+def _load_module_from_repo(module_path: str):
+    """Attempt to load a module by resolving it to a file within ``SLEEPFM_REPO``."""
+
+    rel_parts = module_path.split(".")
+    candidate_files = []
+    for root in (SLEEPFM_REPO, SLEEPFM_REPO / "src"):
+        candidate = root.joinpath(*rel_parts)
+        candidate_files.extend(
+            [
+                candidate.with_suffix(".py"),
+                candidate / "__init__.py",
+            ]
+        )
+
+    for file_path in candidate_files:
+        if file_path.exists():
+            spec = importlib.util.spec_from_file_location(module_path, file_path)
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[module_path] = module
+                spec.loader.exec_module(module)
+                return module
+    return None
 
 
 def _collate_batch(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
