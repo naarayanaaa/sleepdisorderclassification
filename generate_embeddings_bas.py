@@ -9,6 +9,7 @@ import inspect
 import logging
 import re
 import sys
+import types
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -27,6 +28,7 @@ LOG = logging.getLogger(__name__)
 
 def _resolve_encoder_class(qualified_name: str):
     search_roots = _sleepfm_search_roots()
+    _ensure_sleepfm_namespace(search_roots)
 
     if qualified_name.lower() == "auto":
         class_obj, attempted = _auto_select_encoder_class(search_roots)
@@ -76,7 +78,46 @@ def _sleepfm_search_roots() -> List[Path]:
             search_roots.append(candidate)
         else:
             LOG.debug("SleepFM path %s does not exist; skipping", candidate)
+    sleepfm_pkg = SLEEPFM_REPO / "sleepfm"
+    if sleepfm_pkg.exists():
+        search_roots.append(sleepfm_pkg)
     return search_roots
+
+
+def _ensure_sleepfm_namespace(search_roots: Sequence[Path]) -> None:
+    """Ensure ``sleepfm`` behaves like a namespace package even without ``__init__``."""
+
+    for root in search_roots:
+        candidate = Path(root)
+        if candidate.name == "sleepfm":
+            pkg_root = candidate
+            break
+    else:
+        pkg_root = SLEEPFM_REPO / "sleepfm"
+
+    if not pkg_root.exists():
+        return
+
+    package_name = "sleepfm"
+    if package_name not in sys.modules:
+        module = types.ModuleType(package_name)
+        module.__file__ = str(pkg_root / "__init__.py")
+        module.__path__ = [str(pkg_root)]  # type: ignore[attr-defined]
+        sys.modules[package_name] = module
+
+    subpackages = {
+        "sleepfm.models": pkg_root / "models",
+        "sleepfm.encoders": pkg_root / "encoders",
+    }
+    for name, path in subpackages.items():
+        if not path.exists():
+            continue
+        if name not in sys.modules:
+            module = types.ModuleType(name)
+            module.__file__ = str(path / "__init__.py")
+            module.__path__ = [str(path)]  # type: ignore[attr-defined]
+            module.__package__ = name.rsplit(".", 1)[0]
+            sys.modules[name] = module
 
 
 def _import_module_with_repo_fallback(

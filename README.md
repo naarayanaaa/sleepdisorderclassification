@@ -71,7 +71,7 @@ Intermediate outputs (manifests, shard directories, embeddings) are stored under
       completed = subprocess.run(cmd, check=True)
   ```
 
-  Because the scripts create `.done` markers and skip completed work, re-running the cell resumes from the first unfinished subject or embedding batch instead of recomputing everything.
+  Because the scripts create `.done` markers and skip completed work, re-running the cell resumes from the first unfinished subject or embedding batch instead of recomputing everything. The embedding script also initialises the `sleepfm` namespace when the repository is present locally (even if it has not been `pip install`ed), so the same cell works in environments where the upstream codebase simply lives next to these helpers.
 
 ## Extending the Toolkit
 
