@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import importlib
+import logging
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -18,9 +19,34 @@ from config_cap_paths import CHECKPOINT, PROCESSED_DIR, SLEEPFM_REPO
 from sleepfm_cap_manifest_dataset import CapManifestEpochs
 
 
+LOG = logging.getLogger(__name__)
+
+
 def _resolve_encoder_class(qualified_name: str):
     module_path, class_name = qualified_name.rsplit(".", 1)
-    module = importlib.import_module(module_path)
+    try:
+        module = importlib.import_module(module_path)
+    except ModuleNotFoundError:
+        candidate_paths = [SLEEPFM_REPO, SLEEPFM_REPO / "src"]
+        injected = []
+        for candidate in candidate_paths:
+            if candidate.exists():
+                candidate_str = str(candidate)
+                if candidate_str not in sys.path:
+                    sys.path.append(candidate_str)
+                    injected.append(candidate_str)
+        if injected:
+            LOG.debug("Added SleepFM repo paths to sys.path: %s", injected)
+        try:
+            module = importlib.import_module(module_path)
+        except ModuleNotFoundError as retry_error:
+            raise ModuleNotFoundError(
+                (
+                    f"Could not import '{module_path}'. "
+                    "Verify that the SleepFM repository is available at "
+                    f"{SLEEPFM_REPO} or install the package into the environment."
+                )
+            ) from retry_error
     return getattr(module, class_name)
 
 
@@ -45,7 +71,11 @@ def generate_embeddings(
     device: torch.device,
     num_workers: int,
 ) -> None:
-    sys.path.append(str(SLEEPFM_REPO))
+    for candidate in (SLEEPFM_REPO, SLEEPFM_REPO / "src"):
+        if candidate.exists():
+            candidate_str = str(candidate)
+            if candidate_str not in sys.path:
+                sys.path.append(candidate_str)
 
     encoder_class = _resolve_encoder_class(encoder_class_path)
     model = encoder_class()
