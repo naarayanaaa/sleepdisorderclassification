@@ -25,21 +25,30 @@ LOG = logging.getLogger(__name__)
 
 def _resolve_encoder_class(qualified_name: str):
     module_path, class_name = qualified_name.rsplit(".", 1)
-    module, attempted = _import_module_with_repo_fallback(module_path)
-    if module is None:
-        attempted_str = ", ".join(str(p) for p in attempted) if attempted else "<none>"
-        raise ModuleNotFoundError(
-            (
-                f"Could not import '{module_path}'. "
-                "Ensure the SleepFM repository is accessible at "
-                f"{SLEEPFM_REPO} or install the package into the environment. "
-                f"Attempted files: {attempted_str}"
-            )
+    module, attempted, search_roots = _import_module_with_repo_fallback(module_path)
+    if module is not None:
+        try:
+            return getattr(module, class_name)
+        except AttributeError:
+            LOG.debug("Module %s imported but missing %s; falling back to search", module_path, class_name)
+
+    class_obj, attempted_class_files = _load_class_from_repo(class_name, search_roots)
+    if class_obj is not None:
+        return class_obj
+
+    attempted_all = attempted + attempted_class_files
+    attempted_str = ", ".join(str(p) for p in attempted_all) if attempted_all else "<none>"
+    raise ModuleNotFoundError(
+        (
+            f"Could not import '{module_path}'. "
+            "Ensure the SleepFM repository is accessible at "
+            f"{SLEEPFM_REPO} or install the package into the environment. "
+            f"Attempted files: {attempted_str}"
         )
-    return getattr(module, class_name)
+    )
 
 
-def _import_module_with_repo_fallback(module_path: str) -> Tuple[Optional[object], List[Path]]:
+def _import_module_with_repo_fallback(module_path: str) -> Tuple[Optional[object], List[Path], List[Path]]:
     """Import ``module_path`` with additional search paths inside ``SLEEPFM_REPO``."""
 
     search_roots = [p for p in (SLEEPFM_REPO, SLEEPFM_REPO / "src") if p.exists()]
@@ -48,7 +57,7 @@ def _import_module_with_repo_fallback(module_path: str) -> Tuple[Optional[object
         LOG.debug("SleepFM path %s does not exist; skipping", missing)
 
     try:
-        return importlib.import_module(module_path), []
+        return importlib.import_module(module_path), [], search_roots
     except ModuleNotFoundError:
         pass
 
@@ -62,12 +71,12 @@ def _import_module_with_repo_fallback(module_path: str) -> Tuple[Optional[object
         LOG.debug("Added SleepFM repo paths to sys.path: %s", injected)
 
     try:
-        return importlib.import_module(module_path), []
+        return importlib.import_module(module_path), [], search_roots
     except ModuleNotFoundError:
         pass
 
     module, attempted = _load_module_from_repo(module_path, search_roots)
-    return module, attempted
+    return module, attempted, search_roots
 
 
 def _load_module_from_repo(module_path: str, search_roots: List[Path]) -> Tuple[Optional[object], List[Path]]:
@@ -96,6 +105,32 @@ def _load_module_from_repo(module_path: str, search_roots: List[Path]) -> Tuple[
                 if module_name != module_path:
                     sys.modules[module_path] = module
                 return module, attempted
+
+    return None, attempted
+
+
+def _load_class_from_repo(class_name: str, search_roots: List[Path]) -> Tuple[Optional[type], List[Path]]:
+    """Search for ``class_name`` inside ``search_roots`` and return the class if found."""
+
+    attempted: List[Path] = []
+    pattern = f"class {class_name}"
+
+    for root in search_roots:
+        for file_path in root.rglob("*.py"):
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if pattern not in text:
+                continue
+            attempted.append(file_path)
+            module_name = ".".join(file_path.relative_to(root).with_suffix("").parts)
+            module = _load_module_from_file(module_name, file_path)
+            if module is None:
+                continue
+            attr = getattr(module, class_name, None)
+            if attr is not None:
+                return attr, attempted
 
     return None, attempted
 
