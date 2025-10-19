@@ -30,7 +30,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import mne
 import numpy as np
@@ -330,6 +330,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     total_epochs = 0
     channel_counts: List[int] = []
+    processed_this_run: Set[str] = set()
     for edf_path, annotation_path in recording_pairs:
         subject_id = edf_path.stem
         subject_dir, done_marker = _subject_paths(processed_root, subject_id)
@@ -397,6 +398,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             continue
         total_epochs += epochs
         channel_counts.append(n_channels)
+        processed_this_run.add(subject_id)
         # Reload manifest so subsequent iterations have access to the fresh rows
         manifest_frame = pd.read_csv(manifest_path)
 
@@ -409,7 +411,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             ]
             total_epochs = len(manifest_frame)
 
-    LOGGER.info("Processed %d subjects", len(channel_counts))
+    if processed_this_run:
+        LOGGER.info("Processed %d subjects in this run", len(processed_this_run))
+    elif channel_counts:
+        LOGGER.info("No subjects required processing in this run; using existing manifest summary")
+
+    LOGGER.info("Subjects with available BAS shards: %d", len(channel_counts))
     LOGGER.info("Total epochs: %d", total_epochs)
     if channel_counts:
         LOGGER.info(

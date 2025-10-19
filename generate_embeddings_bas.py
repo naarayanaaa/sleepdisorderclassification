@@ -25,57 +25,95 @@ LOG = logging.getLogger(__name__)
 
 def _resolve_encoder_class(qualified_name: str):
     module_path, class_name = qualified_name.rsplit(".", 1)
-    try:
-        module = importlib.import_module(module_path)
-    except ModuleNotFoundError:
-        candidate_paths = [SLEEPFM_REPO, SLEEPFM_REPO / "src"]
-        injected = []
-        for candidate in candidate_paths:
-            if candidate.exists():
-                candidate_str = str(candidate)
-                if candidate_str not in sys.path:
-                    sys.path.append(candidate_str)
-                    injected.append(candidate_str)
-        if injected:
-            LOG.debug("Added SleepFM repo paths to sys.path: %s", injected)
-        try:
-            module = importlib.import_module(module_path)
-        except ModuleNotFoundError as retry_error:
-            module = _load_module_from_repo(module_path)
-            if module is None:
-                raise ModuleNotFoundError(
-                    (
-                        f"Could not import '{module_path}'. "
-                        "Verify that the SleepFM repository is available at "
-                        f"{SLEEPFM_REPO} or install the package into the environment."
-                    )
-                ) from retry_error
+    module, attempted = _import_module_with_repo_fallback(module_path)
+    if module is None:
+        attempted_str = ", ".join(str(p) for p in attempted) if attempted else "<none>"
+        raise ModuleNotFoundError(
+            (
+                f"Could not import '{module_path}'. "
+                "Ensure the SleepFM repository is accessible at "
+                f"{SLEEPFM_REPO} or install the package into the environment. "
+                f"Attempted files: {attempted_str}"
+            )
+        )
     return getattr(module, class_name)
 
 
-def _load_module_from_repo(module_path: str):
-    """Attempt to load a module by resolving it to a file within ``SLEEPFM_REPO``."""
+def _import_module_with_repo_fallback(module_path: str) -> Tuple[Optional[object], List[Path]]:
+    """Import ``module_path`` with additional search paths inside ``SLEEPFM_REPO``."""
 
+    search_roots = [p for p in (SLEEPFM_REPO, SLEEPFM_REPO / "src") if p.exists()]
+    missing_roots = [p for p in (SLEEPFM_REPO, SLEEPFM_REPO / "src") if not p.exists()]
+    for missing in missing_roots:
+        LOG.debug("SleepFM path %s does not exist; skipping", missing)
+
+    try:
+        return importlib.import_module(module_path), []
+    except ModuleNotFoundError:
+        pass
+
+    injected = []
+    for root in search_roots:
+        root_str = str(root)
+        if root_str not in sys.path:
+            sys.path.append(root_str)
+            injected.append(root_str)
+    if injected:
+        LOG.debug("Added SleepFM repo paths to sys.path: %s", injected)
+
+    try:
+        return importlib.import_module(module_path), []
+    except ModuleNotFoundError:
+        pass
+
+    module, attempted = _load_module_from_repo(module_path, search_roots)
+    return module, attempted
+
+
+def _load_module_from_repo(module_path: str, search_roots: List[Path]) -> Tuple[Optional[object], List[Path]]:
+    """Attempt to load ``module_path`` from explicit files inside ``search_roots``."""
+
+    attempted: List[Path] = []
     rel_parts = module_path.split(".")
-    candidate_files = []
-    for root in (SLEEPFM_REPO, SLEEPFM_REPO / "src"):
-        candidate = root.joinpath(*rel_parts)
-        candidate_files.extend(
-            [
-                candidate.with_suffix(".py"),
-                candidate / "__init__.py",
-            ]
-        )
+    target_stem = rel_parts[-1]
 
-    for file_path in candidate_files:
-        if file_path.exists():
-            spec = importlib.util.spec_from_file_location(module_path, file_path)
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_path] = module
-                spec.loader.exec_module(module)
-                return module
-    return None
+    for root in search_roots:
+        candidate = root.joinpath(*rel_parts)
+        direct_files = [candidate.with_suffix(".py"), candidate / "__init__.py"]
+        for file_path in direct_files:
+            attempted.append(file_path)
+            module = _load_module_from_file(module_path, file_path)
+            if module is not None:
+                return module, attempted
+
+    for root in search_roots:
+        pattern = f"{target_stem}.py"
+        for match in root.rglob(pattern):
+            attempted.append(match)
+            module_name = ".".join(match.relative_to(root).with_suffix("").parts)
+            module = _load_module_from_file(module_name, match)
+            if module is not None:
+                if module_name != module_path:
+                    sys.modules[module_path] = module
+                return module, attempted
+
+    return None, attempted
+
+
+def _load_module_from_file(module_name: str, file_path: Path) -> Optional[object]:
+    if not file_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+    except ModuleNotFoundError as exc:
+        LOG.debug("Failed to execute module %s from %s: %s", module_name, file_path, exc)
+        return None
+    return module
 
 
 def _collate_batch(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
