@@ -40,6 +40,8 @@ from config_cap_paths import EPOCH_LEN_S, FS_TARGET, PROCESSED_DIR, RAW_DIR
 
 LOGGER = logging.getLogger(__name__)
 
+DONE_MARKER_NAME = ".done"
+
 
 @dataclass
 class StageInterval:
@@ -192,6 +194,15 @@ def _zscore(data: np.ndarray) -> np.ndarray:
     return (data - mean) / std
 
 
+def _subject_paths(processed_root: Path, subject_id: str) -> Tuple[Path, Path]:
+    """Return (BAS shard directory, done marker path) for the given subject."""
+
+    subject_root = processed_root / "shards" / subject_id
+    bas_dir = subject_root / "BAS"
+    done_marker = subject_root / DONE_MARKER_NAME
+    return bas_dir, done_marker
+
+
 def process_recording(
     edf_path: Path,
     annotation_path: Path,
@@ -222,7 +233,7 @@ def process_recording(
     hypnogram = build_epoch_hypnogram(stage_intervals, n_epochs, epoch_len_s)
     emg_mask = build_epoch_emg_mask(emg_events, n_epochs, epoch_len_s)
 
-    subject_dir = processed_root / "shards" / subject_id / "BAS"
+    subject_dir, done_marker = _subject_paths(processed_root, subject_id)
     subject_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_rows = []
@@ -251,14 +262,17 @@ def process_recording(
         )
 
     manifest_path = processed_root / "manifest_cap_rbd_bas_only.csv"
+    new_rows = pd.DataFrame(manifest_rows)
     if manifest_path.exists():
         existing = pd.read_csv(manifest_path)
-        combined = pd.concat([existing, pd.DataFrame(manifest_rows)], ignore_index=True)
+        existing = existing[existing["subject_id"] != subject_id]
+        combined = pd.concat([existing, new_rows], ignore_index=True)
     else:
-        combined = pd.DataFrame(manifest_rows)
+        combined = new_rows
     combined.sort_values(["subject_id", "epoch_idx"], inplace=True)
     combined.to_csv(manifest_path, index=False)
 
+    done_marker.touch()
     LOGGER.info("%s → %d epochs", subject_id, n_epochs)
     return n_epochs, data.shape[0]
 
@@ -311,6 +325,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     total_epochs = 0
     channel_counts: List[int] = []
     for edf_path, annotation_path in recording_pairs:
+        subject_id = edf_path.stem
+        subject_dir, done_marker = _subject_paths(processed_root, subject_id)
+        if done_marker.exists():
+            shard_exists = subject_dir.exists() and any(subject_dir.glob("*.npy"))
+            if shard_exists:
+                LOGGER.info(
+                    "Skipping %s because %s is present and shards already exist",
+                    subject_id,
+                    done_marker,
+                )
+                continue
+            LOGGER.warning(
+                "Found %s for %s but no shards detected; removing marker and reprocessing",
+                done_marker,
+                subject_id,
+            )
+            done_marker.unlink(missing_ok=True)
         try:
             epochs, n_channels = process_recording(
                 edf_path,

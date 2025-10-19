@@ -49,6 +49,19 @@ Each stage shares configuration through `config_cap_paths.py`, ensuring consiste
 
 Intermediate outputs (manifests, shard directories, embeddings) are stored under `PROCESSED_DIR`, making the pipeline restartable from any stage by reusing the generated artifacts.
 
+### Incremental and Notebook-Friendly Execution
+
+* **Automatic resume points**: Each time `bridge_cap_to_sleepfm.py` finishes a subject successfully it creates a `.done` marker inside `sleepfm_processed/shards/<subject_id>/`. When you rerun the script it will skip subjects that already have both the marker and their BAS shard files, so you can safely resume after an interruption without reprocessing earlier nights. To force a redo for a particular subject, delete its `.done` file (and optionally the shard directory) before re-running the script.
+* **Manifest de-duplication**: Reprocessing a subject replaces its rows inside `manifest_cap_rbd_bas_only.csv`, keeping the manifest consistent even after partial reruns.
+* **Running from Jupyter**: Import the scripts and call their functions directly instead of launching a shell command. For example:
+
+  ```python
+  from bridge_cap_to_sleepfm import main as run_bridge
+  run_bridge(["--raw-dir", "C:/path/to/raw", "--processed-dir", "C:/path/to/sleepfm_processed"])
+  ```
+
+  The same approach works for the embedding and probe scripts (`generate_embeddings_bas.main([...])`, `train_rbd_probe.main([...])`). Because the `.done` markers guard each subject, you can re-run the bridge cell and it will automatically pick up at the first unfinished recording.
+
 ## Extending the Toolkit
 
 * Add multi-modality support by modifying `bridge_cap_to_sleepfm.py` to emit ECG or respiratory modalities and adjusting SleepFM configuration accordingly.
