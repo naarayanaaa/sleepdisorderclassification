@@ -47,11 +47,16 @@ class CapManifestEpochs(Dataset):
         columns: Optional[Sequence[str]] = None,
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
+        frame: Optional[pd.DataFrame] = None,
     ) -> None:
         self.manifest_path = Path(manifest_path)
-        if not self.manifest_path.exists():
-            raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
-        self._frame = pd.read_csv(self.manifest_path)
+        if frame is None:
+            if not self.manifest_path.exists():
+                raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
+            source_frame = pd.read_csv(self.manifest_path)
+        else:
+            source_frame = frame.copy()
+        self._frame = source_frame.reset_index(drop=True)
         missing = self.required_columns.difference(self._frame.columns)
         if missing:
             raise ValueError(f"Manifest is missing required columns: {sorted(missing)}")

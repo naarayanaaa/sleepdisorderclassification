@@ -327,8 +327,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     for edf_path, annotation_path in recording_pairs:
         subject_id = edf_path.stem
         subject_dir, done_marker = _subject_paths(processed_root, subject_id)
+        shard_exists = subject_dir.exists() and any(subject_dir.glob("*.npy"))
         if done_marker.exists():
-            shard_exists = subject_dir.exists() and any(subject_dir.glob("*.npy"))
             if shard_exists:
                 LOGGER.info(
                     "Skipping %s because %s is present and shards already exist",
@@ -342,6 +342,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 subject_id,
             )
             done_marker.unlink(missing_ok=True)
+        elif shard_exists:
+            LOGGER.info(
+                "Detected existing shards for %s without a %s marker; assuming prior success",
+                subject_id,
+                DONE_MARKER_NAME,
+            )
+            done_marker.touch()
+            continue
         try:
             epochs, n_channels = process_recording(
                 edf_path,

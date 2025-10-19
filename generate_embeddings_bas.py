@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -61,6 +61,40 @@ def _collate_batch(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.
     }
 
 
+def _load_manifest_subset(
+    manifest_path: Path,
+    output_csv: Path,
+    embeddings_dir: Path,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Set[str]]:
+    """Return (manifest, existing_embeddings, pending_manifest, completed_subjects)."""
+
+    manifest = pd.read_csv(manifest_path)
+    existing = (
+        pd.read_csv(output_csv)
+        if output_csv.exists()
+        else pd.DataFrame(columns=["subject_id", "epoch_idx", "stage_code", "emb_path"])
+    )
+
+    completed_subjects: Set[str] = set()
+    for subject_dir in embeddings_dir.glob("*/"):
+        marker = subject_dir / ".done"
+        subject_id = subject_dir.name
+        if marker.exists():
+            completed_subjects.add(subject_id)
+
+    if not existing.empty:
+        existing_pairs = existing[["subject_id", "epoch_idx"]].drop_duplicates()
+        merged = manifest.merge(existing_pairs.assign(_present=True), how="left", on=["subject_id", "epoch_idx"])
+        pending = merged[merged["_present"].isna()].drop(columns=["_present"])
+    else:
+        pending = manifest.copy()
+
+    if completed_subjects:
+        pending = pending[~pending["subject_id"].isin(completed_subjects)]
+
+    return manifest, existing, pending.reset_index(drop=True), completed_subjects
+
+
 def generate_embeddings(
     manifest_path: Path,
     output_csv: Path,
@@ -86,7 +120,24 @@ def generate_embeddings(
     model.to(device)
     model.eval()
 
-    dataset = CapManifestEpochs(manifest_path)
+    embeddings_dir = output_csv.parent / "embeddings"
+    embeddings_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest, existing, pending, completed_subjects = _load_manifest_subset(
+        manifest_path,
+        output_csv,
+        embeddings_dir,
+    )
+
+    if pending.empty:
+        LOG.info(
+            "No pending epochs detected. %d subjects already completed (markers: %s)",
+            len(completed_subjects),
+            ", ".join(sorted(completed_subjects)) if completed_subjects else "none",
+        )
+        return
+
+    dataset = CapManifestEpochs(manifest_path, frame=pending)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -95,10 +146,8 @@ def generate_embeddings(
         collate_fn=_collate_batch,
     )
 
-    embeddings_dir = output_csv.parent / "embeddings"
-    embeddings_dir.mkdir(parents=True, exist_ok=True)
-
     records: List[Dict[str, object]] = []
+    processed_subjects: Set[str] = set()
     with torch.no_grad():
         for batch in tqdm(loader, desc="Embedding BAS epochs"):
             bas = batch["bas"].to(device=device, non_blocking=True)
@@ -109,6 +158,7 @@ def generate_embeddings(
             for idx, vector in enumerate(embeddings):
                 subject_id = batch["subject_id"][idx]
                 epoch_idx = batch["epoch_idx"][idx]
+                processed_subjects.add(subject_id)
                 emb_dir = embeddings_dir / subject_id
                 emb_dir.mkdir(parents=True, exist_ok=True)
                 emb_path = emb_dir / f"epoch_{epoch_idx:06d}.npy"
@@ -122,10 +172,31 @@ def generate_embeddings(
                     }
                 )
 
-    with output_csv.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["subject_id", "epoch_idx", "stage_code", "emb_path"])
-        writer.writeheader()
-        writer.writerows(records)
+    if not records:
+        LOG.info("No new embeddings were generated.")
+        return
+
+    new_frame = pd.DataFrame.from_records(records)
+    combined = pd.concat([existing, new_frame], ignore_index=True)
+    combined.sort_values(["subject_id", "epoch_idx"], inplace=True)
+    combined.to_csv(output_csv, index=False)
+
+    for subject_id in processed_subjects:
+        subject_manifest = manifest[manifest["subject_id"] == subject_id]
+        subject_embeddings = combined[combined["subject_id"] == subject_id]
+        marker_path = embeddings_dir / subject_id / ".done"
+        if len(subject_embeddings) >= len(subject_manifest):
+            marker_path.touch()
+            LOG.info("Marked subject %s as complete (embeddings: %d)", subject_id, len(subject_embeddings))
+        else:
+            if marker_path.exists():
+                marker_path.unlink()
+            LOG.info(
+                "Subject %s has %d/%d embeddings; leaving marker absent",
+                subject_id,
+                len(subject_embeddings),
+                len(subject_manifest),
+            )
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:

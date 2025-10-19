@@ -51,8 +51,9 @@ Intermediate outputs (manifests, shard directories, embeddings) are stored under
 
 ### Incremental and Notebook-Friendly Execution
 
-* **Automatic resume points**: Each time `bridge_cap_to_sleepfm.py` finishes a subject successfully it creates a `.done` marker inside `sleepfm_processed/shards/<subject_id>/`. When you rerun the script it will skip subjects that already have both the marker and their BAS shard files, so you can safely resume after an interruption without reprocessing earlier nights. To force a redo for a particular subject, delete its `.done` file (and optionally the shard directory) before re-running the script.
+* **Automatic resume points**: Each time `bridge_cap_to_sleepfm.py` finishes a subject successfully it creates a `.done` marker inside `sleepfm_processed/shards/<subject_id>/`. When you rerun the script it will skip subjects that already have both the marker and their BAS shard files, so you can safely resume after an interruption without reprocessing earlier nights. If shards are present but the marker is missing (e.g., from an earlier run of the script), the bridge now recognises the completed subject, creates the marker, and skips ahead automatically. To force a redo for a particular subject, delete its `.done` file (and optionally the shard directory) before re-running the script.
 * **Manifest de-duplication**: Reprocessing a subject replaces its rows inside `manifest_cap_rbd_bas_only.csv`, keeping the manifest consistent even after partial reruns.
+* **Embedding resume support**: `generate_embeddings_bas.py` inspects the existing `embeddings_bas.csv` file and the `.done` markers under `sleepfm_processed/embeddings/<subject_id>/`. Any epoch that already has an embedding on disk is skipped, so you can restart the embedding generation stage and it will pick up exactly where it left off. The script only recomputes embeddings for missing `(subject_id, epoch_idx)` pairs and appends them to the CSV.
 * **Running from Jupyter**: Import the scripts and call their functions directly instead of launching a shell command. For example:
 
   ```python
